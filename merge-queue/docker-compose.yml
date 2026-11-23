@@ -1,0 +1,21 @@
+services:
+  merge-queue:
+    build: .
+    image: merge-queue:latest
+    container_name: merge-queue
+    ports:
+      - "8000:8000"
+    environment:
+      MQ_DATA_DIR: /data
+      MQ_WORKER_INTERVAL: "1.0"
+      MQ_TEST_TIMEOUT: "120"
+    volumes:
+      - mq-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  mq-data:
