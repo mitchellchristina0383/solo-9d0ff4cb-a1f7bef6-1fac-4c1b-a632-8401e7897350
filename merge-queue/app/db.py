@@ -89,6 +89,13 @@ def transaction():
             raise
 
 
+@contextmanager
+def locked():
+    """暴露进程内锁：入队钉住提交 / 终态释放保留需要与读写同一把锁。"""
+    with _lock:
+        yield
+
+
 def now() -> float:
     return time.time()
 
@@ -190,6 +197,30 @@ def list_runs(item_id: int) -> list[dict[str, Any]]:
 def reset_to_pending(item_id: int, reason: str) -> None:
     """作废当前尝试：回到 PENDING，等待用新主干重试。"""
     update_item(item_id, status=PENDING, reason=reason)
+
+
+def count_active_with_commit(commit_sha: str) -> int:
+    """仍引用某提交的活跃（非终态）队列项数量，用于保留引用计数。"""
+    with _lock:
+        assert _conn is not None
+        row = _conn.execute(
+            "SELECT COUNT(*) AS n FROM items WHERE commit_sha=? AND status IN "
+            f"({','.join('?' * len(ACTIVE_STATUSES))})",
+            (commit_sha, *ACTIVE_STATUSES),
+        ).fetchone()
+        return int(row["n"])
+
+
+def list_active_commits() -> list[str]:
+    """所有活跃队列项登记的去重提交号（启动时重建保留引用用）。"""
+    with _lock:
+        assert _conn is not None
+        rows = _conn.execute(
+            "SELECT DISTINCT commit_sha FROM items WHERE status IN "
+            f"({','.join('?' * len(ACTIVE_STATUSES))})",
+            ACTIVE_STATUSES,
+        ).fetchall()
+        return [r["commit_sha"] for r in rows]
 
 
 def cancel_item(item_id: int) -> dict[str, Any] | None:

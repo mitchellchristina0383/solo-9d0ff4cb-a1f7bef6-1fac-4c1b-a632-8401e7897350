@@ -26,6 +26,11 @@ class WorkerLogicTest(unittest.TestCase):
         with db.transaction() as conn:
             conn.execute("DELETE FROM runs")
             conn.execute("DELETE FROM items")
+        # worker 现在会检查登记提交对象是否存在：桩为存在（git 交互由用例自管）
+        commit_exists = mock.patch.object(git_tools, "commit_exists",
+                                          return_value=True)
+        self.addCleanup(commit_exists.stop)
+        commit_exists.start()
         self.worker = Worker()
 
     def _enqueue(self) -> dict:

@@ -67,6 +67,14 @@ class BranchOut(BaseModel):
     branches: list[str]
 
 
+class UpdateBranchResponse(BaseModel):
+    branch: str
+    old_sha: str
+    new_sha: str
+    detail: str = "替换成功：分支已指向新提交；之后入队的队列项将登记新提交，"
+    "此前已受理的项仍按原登记提交处理（对象由队列保留，重启+gc 后仍可处理）"
+
+
 class MessageOut(BaseModel):
     detail: str
 

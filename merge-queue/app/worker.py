@@ -17,7 +17,7 @@ import logging
 import threading
 import time
 
-from . import db, git_tools
+from . import db, git_tools, retention
 from .config import settings
 from .runner import run_tests
 
@@ -76,11 +76,20 @@ class Worker:
             # 分支被删除：无法再合并，记为失败并放行后续项
             db.update_item(item_id, status=db.FAILED,
                            reason=f"分支 {branch} 在中心仓库中已不存在")
+            retention.release_if_unused(commit)
             return
         if head != commit:
-            # 分支在入队后又有新提交：仍按入队时提交处理，但显式记录
+            # 分支在入队后被更新（含 bundle 非快进替换）：仍按入队时
+            # 登记的提交处理，对象由队列保留引用保护
             log.warning("item=%s 分支头 %s 与入队提交 %s 不一致，按入队提交处理",
                         item_id, head[:8], commit[:8])
+        if not git_tools.commit_exists(commit):
+            # 保留引用失效等极端情况：对象已被回收，无法验证，判终态防死循环
+            db.update_item(item_id, status=db.FAILED,
+                           reason=f"登记提交 {commit} 的对象已不在中心仓库"
+                                  "（可能被 gc 回收），无法继续验证")
+            retention.release_if_unused(commit)
+            return
 
         base = git_tools.main_head()
         run_id = db.start_run(item_id, base)
@@ -89,7 +98,7 @@ class Worker:
             outcome = git_tools.merge_in_worktree(worktree, branch, commit, base)
             if not outcome.ok:
                 self._finish_negative(item_id, run_id, db.RUN_CONFLICT,
-                                      outcome.reason, worktree, base)
+                                      outcome.reason, worktree, base, commit)
                 return
 
             # 分支已包含在主干：无需测试，直接判定完成
@@ -98,12 +107,13 @@ class Worker:
                               "跳过测试：无新增提交", base)
                 db.update_item(item_id, status=db.MERGED, base_sha=base,
                                result_sha=base, reason=outcome.reason)
+                retention.release_if_unused(commit)
                 return
 
             test = run_tests(worktree)
             if not test.passed:
                 self._finish_negative(item_id, run_id, db.RUN_FAILED,
-                                      test.output, worktree, base,
+                                      test.output, worktree, base, commit,
                                       result_sha=outcome.result_sha)
                 return
 
@@ -119,6 +129,7 @@ class Worker:
                               outcome.result_sha)
                 db.update_item(item_id, status=db.MERGED, base_sha=base,
                                result_sha=outcome.result_sha, reason=None)
+                retention.release_if_unused(commit)
                 log.info("item=%s 已合并，main -> %s", item_id,
                          outcome.result_sha[:8])
             else:
@@ -132,6 +143,7 @@ class Worker:
     # ------------------------------------------------------------------
     def _finish_negative(self, item_id: int, run_id: int, run_status: str,
                          detail: str | None, worktree: str, base: str,
+                         commit_sha: str,
                          result_sha: str | None = None) -> None:
         """冲突/失败收尾：若主干已变则作废重做，否则置终态并放行下一项。"""
         current = git_tools.main_head()
@@ -143,6 +155,7 @@ class Worker:
         db.finish_run(run_id, run_status, detail, detail, result_sha)
         db.update_item(item_id, status=item_status, base_sha=base,
                        result_sha=result_sha, reason=detail)
+        retention.release_if_unused(commit_sha)
         log.info("item=%s 终态 %s", item_id, item_status)
 
     def _obsolete(self, item_id: int, run_id: int, base: str, current: str,

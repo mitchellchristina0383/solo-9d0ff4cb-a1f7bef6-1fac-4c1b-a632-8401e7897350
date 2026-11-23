@@ -73,6 +73,22 @@ def branch_head(branch: str) -> str | None:
     return proc.stdout.strip()
 
 
+def is_valid_branch_name(branch: str) -> bool:
+    """校验分支名能否安全地拼进 refs/heads/<branch>。"""
+    if not branch or branch != branch.strip():
+        return False
+    proc = run_git(["check-ref-format", f"refs/heads/{branch}"],
+                   cwd=settings.central_repo_dir, check=False)
+    return proc.returncode == 0
+
+
+def commit_exists(sha: str) -> bool:
+    """登记提交的对象是否仍在中心仓库（gc 后可能丢失）。"""
+    proc = run_git(["cat-file", "-e", f"{sha}^{{commit}}"],
+                   cwd=settings.central_repo_dir, check=False)
+    return proc.returncode == 0
+
+
 def list_branches() -> list[str]:
     proc = run_git(["for-each-ref", "--format=%(refname:short)", "refs/heads"],
                    cwd=settings.central_repo_dir)
@@ -148,6 +164,41 @@ def cas_update_main(new_sha: str, expected_old: str) -> bool:
     proc = run_git(["update-ref", "refs/heads/main", new_sha, expected_old],
                    cwd=settings.central_repo_dir, check=False)
     return proc.returncode == 0
+
+
+# ----------------------------------------------------------------------
+# 队列保留引用：防止已入队登记提交在非快进替换/重启后被 gc 回收
+# ----------------------------------------------------------------------
+
+RETAIN_PREFIX = "refs/queue-retain/"
+
+
+def retain_ref_name(sha: str) -> str:
+    return f"{RETAIN_PREFIX}{sha}"
+
+
+def ensure_retain_ref(sha: str) -> None:
+    """为登记提交建立保留引用（幂等）。提交对象必须存在。"""
+    run_git(["update-ref", retain_ref_name(sha), sha],
+            cwd=settings.central_repo_dir)
+
+
+def drop_retain_ref(sha: str) -> None:
+    """删除保留引用；不存在时静默成功。"""
+    run_git(["update-ref", "-d", retain_ref_name(sha)],
+            cwd=settings.central_repo_dir, check=False)
+
+
+def list_retain_refs() -> list[str]:
+    """列出当前所有被保留的提交号。"""
+    proc = run_git(["for-each-ref", "--format=%(refname)", RETAIN_PREFIX],
+                   cwd=settings.central_repo_dir)
+    out = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.startswith(RETAIN_PREFIX):
+            out.append(line[len(RETAIN_PREFIX):])
+    return out
 
 
 def advance_main_with_commit(filename: str = "mainlog.md",
